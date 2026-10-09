@@ -12,6 +12,13 @@ trunk build --release              # writes ../../dist/web (index.html, .js glue
 trunk serve --release              # dev server on http://127.0.0.1:8766
 ```
 
+What the web build needs: `trunk`, the `wasm32-unknown-unknown` target and `cargo`, nothing else (no
+POSIX shell, so it works the same on Windows). Optionally, `CRAFT_FONTS_DIR` set to an absolute
+craft-fonts checkout adds the fonts the site serves beside the wasm: Trunk's `post_build` hook runs
+`cargo xtask web-fonts`, which copies them into `dist/web/fonts/` (it does nothing without
+`CRAFT_FONTS_DIR`, and skips with a warning any listed face an older checkout lacks). See
+[Arabic fonts and the web build](#arabic-fonts-and-the-web-build).
+
 Any static file server works for `dist/web`, for example `python3 -m http.server 8766` inside that directory. The release `.wasm` is about 17.5 MB, or 7.1 MB gzipped, so serve it with compression.
 
 URL flag: `?webgl` forces the WebGL2 backend.
@@ -124,6 +131,25 @@ CRAFT_FONTS_DIR="$PWD/../craft-fonts" cargo xtask ci   # also runs the Japanese-
   CI job and every release job (`release.yml`) check craft-fonts out at a pinned commit; release
   packages carry each embedded font's `OFL-<family>.txt`.
 
+### Arabic fonts and the web build
+
+Desktop builds load craft-fonts' Arabic families into the document font database (Noto Sans
+Arabic first, the fallback for Arabic text; the others are picked by name).
+
+The web build doesn't embed them (wasm size). Instead `crates/text/web-fonts.txt` lists the faces
+it fetches from beside the wasm, `startup` (before the app starts) or `background` (after):
+
+- `crates/text/build.rs` turns the list into `vectorcraft_text::WEB_FONTS` (URL
+  `fonts/<sha16>/<file>` and the SRI hash, from the craft-fonts manifest).
+- `cargo xtask web-fonts` (`xtask/src/web_fonts.rs`), the Trunk `post_build` hook, copies the files
+  there, checking each one's SHA-256. A listed face the checkout lacks is skipped with a warning, as
+  in `build.rs`, so an older craft-fonts just means fewer fonts.
+- `apps/vectorcraft-web/src/fonts.rs` fetches and registers them, logging `web font …` for any
+  that fail.
+
+Try it: `cd apps/vectorcraft-web && CRAFT_FONTS_DIR=$PWD/../../../craft-fonts trunk serve`. To serve
+another craft-fonts face on the web, add a line to `web-fonts.txt`.
+
 ## Localisation
 
 Strings in code stay English and are the default lookup keys. `crates/ui-egui/src/i18n` maps them to display
@@ -167,10 +193,10 @@ locale such as `ru-RU`, `ru-BY` or `ru-KZ` resolves to it), Ukrainian (`uk`, com
   control channel, MCP and tests read them) and are translated only where the status bar draws them
   (`i18n::msg`). `@msg` catalog rows hold a whole message or a template such as
   `Couldn't open {name}: {e}`; `{_1}`, `{_2}` … stand for the format string's `{}`, and the values in the
-  placeholders are translated in turn (the reason after `: {e}` is often a message too). Spanish, French, Italian, Russian and Ukrainian cover every
+  placeholders are translated in turn (the reason after `: {e}` is often a message too). Spanish, French, Italian, Japanese, Russian and Ukrainian cover every
   message literal the test scan finds (`complete_languages_translate_every_message`, languages listed in
   `COMPLETE_MESSAGES`): a new `Err("…")`, `Other(…)`, `#[error(…)]` or `status(…)` message needs an `es.tsv`,
-  a `fr.tsv`, an `it.tsv`, a `ru.tsv` and a `uk.tsv` row (`VECTORCRAFT_I18N_DUMP_MESSAGES=messages.txt cargo test -p vectorcraft-ui-egui
+  a `fr.tsv`, an `it.tsv`, a `ja.tsv`, a `ru.tsv` and a `uk.tsv` row (`VECTORCRAFT_I18N_DUMP_MESSAGES=messages.txt cargo test -p vectorcraft-ui-egui
   complete_languages_translate_every_message` lists them all). Other languages show messages in English
   until they add `@msg` rows.
 - Not translated on purpose: names that are user data (layers, swatches, fonts, documents), the tab
