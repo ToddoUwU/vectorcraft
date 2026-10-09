@@ -32,7 +32,7 @@ arboard = { workspace = true, features = ["image-data", "wayland-data-control"] 
 image = { workspace = true }
 webbrowser = { workspace = true }
 # The window's monitors, size and position (the same winit eframe runs on).
-winit = { version = "0.30", default-features = false }
+winit = { version = "0.30", default-features = false, features = ["wayland"] }
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = { workspace = true }

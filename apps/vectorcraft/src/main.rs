@@ -585,3 +585,8 @@ mod tests {
         assert_eq!(plist.matches("<string>Owner</string>").count(), 2, "only VectorCraft documents and templates are owned");
     }
 }
+
+// PersonalUpdates: native Wayland file drops come from the patched winit (root Cargo.toml);
+// this fails the build if the patch ever stops applying.
+#[cfg(target_os = "linux")]
+const _: bool = winit::platform::wayland::FILE_DROPS;
