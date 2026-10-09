@@ -105,6 +105,11 @@ fn main() -> ExitCode {
     #[cfg(all(windows, not(target_vendor = "win7")))]
     system_fonts::install();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `vectorcraft-cli run --help` asks for help, not for an option called `--help`.
+    if args.iter().skip(1).any(|a| a == "-h" || a == "--help") {
+        out!("{}", usage());
+        return ExitCode::SUCCESS;
+    }
     let r = match args.first().map(String::as_str) {
         Some("mcp") => mcp(&args[1..]),
         Some("run") => run(&args[1..]),

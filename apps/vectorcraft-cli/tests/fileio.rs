@@ -83,6 +83,15 @@ fn help_lists_readable_formats() {
     assert!(out.contains("Readable formats: .vectorcraft") && out.contains(".ait") && out.contains(".webp"), "{out}");
 }
 
+/// `--help` after a subcommand prints the usage instead of failing as an unknown option.
+#[test]
+fn subcommand_help_prints_usage() {
+    for sub in ["run", "mcp", "convert", "bench"] {
+        let out = ok(&[sub, "--help"]);
+        assert!(out.contains("USAGE:"), "{sub}: {out}");
+    }
+}
+
 /// `info` reports the import warnings: an EPS read only up to an error names it.
 #[test]
 fn info_reports_why_an_eps_read_partly() {
