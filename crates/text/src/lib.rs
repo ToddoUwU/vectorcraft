@@ -30,8 +30,9 @@ pub use fontdb::{
     FALLBACK_FAMILY, FontClass, FontDb, FontFace, FontMatch, FontTraits, IcfMargins, PlatformFontFiles, set_platform_font_files, set_user_font_dirs,
     style_weight, system_font_dirs, user_font_dirs,
 };
+pub use hyphen::{hyphenation_exceptions, set_hyphenation_exceptions};
 use kurbo::{Affine, BezPath, Point, Rect, Vec2};
-pub use layout::{layout, layout_with};
+pub use layout::{decorations, layout, layout_with};
 pub use vectorcraft_doc::TextObject;
 
 pub use vectorcraft_doc::{AreaFit, FirstBaseline, VerticalAlign};

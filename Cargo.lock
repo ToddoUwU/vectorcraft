@@ -4320,7 +4320,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "arboard",
  "block2 0.6.2",
@@ -4344,11 +4344,12 @@ dependencies = [
  "windows",
  "winit",
  "winresource",
+ "winsafe",
 ]
 
 [[package]]
 name = "vectorcraft-affinity"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -4359,7 +4360,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-brush"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "kurbo 0.13.1",
  "serde",
@@ -4371,7 +4372,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-cad"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "image",
  "kurbo 0.13.1",
@@ -4387,7 +4388,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "log",
  "objc2-core-foundation",
@@ -4408,7 +4409,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-color"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "kurbo 0.13.1",
  "moxcms",
@@ -4420,7 +4421,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-doc"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "image",
  "jpeg-encoder",
@@ -4437,7 +4438,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-effects"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "kurbo 0.13.1",
  "serde_json",
@@ -4451,7 +4452,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "crc32fast",
  "flate2",
@@ -4486,7 +4487,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-eps"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flate2",
  "image",
@@ -4505,7 +4506,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-format"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flate2",
  "proptest",
@@ -4519,7 +4520,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-geom"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "kurbo 0.13.1",
  "proptest",
@@ -4531,7 +4532,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-mcp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "image",
  "log",
@@ -4550,7 +4551,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-metafile"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "image",
  "kurbo 0.13.1",
@@ -4564,7 +4565,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-pathops"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "kurbo 0.13.1",
  "linesweeper",
@@ -4576,7 +4577,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-pdf"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "aes",
  "flate2",
@@ -4605,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-plugins"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -4619,7 +4620,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-render"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flate2",
  "gif",
@@ -4644,7 +4645,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-svg"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "flate2",
  "image",
@@ -4668,7 +4669,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-testkit"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "image",
  "kurbo 0.13.1",
@@ -4685,7 +4686,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-text"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "harfrust 0.13.3",
  "kurbo 0.13.1",
@@ -4703,7 +4704,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-tools"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "image",
  "kurbo 0.13.1",
@@ -4718,7 +4719,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-trace"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "image",
  "kurbo 0.13.1",
@@ -4731,7 +4732,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-ui-egui"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "egui",
  "egui_extras",
@@ -4760,7 +4761,7 @@ dependencies = [
 
 [[package]]
 name = "vectorcraft-web"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "eframe",
  "egui",
@@ -5744,6 +5745,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "winsafe"
+version = "0.0.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ef0ffc427f045c0cc9ebffd6f4f91153dcd2a1547b5c3c29ee3f541e16e95c6"
+
+[[package]]
 name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5863,7 +5870,7 @@ checksum = "9440ea3e5aeabb0ac63af70daf835274065238cdd0cec83418f417eae38bacee"
 
 [[package]]
 name = "xtask"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "serde_json",
 ]

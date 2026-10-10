@@ -416,7 +416,19 @@ strokes, effects or a brush comes in as its drawn look (a group named after it).
 text object's place; hidden point type is made from the file's text document. A file whose editing data has symbols,
 pattern fills, placed files or anything else the reader doesn't read on a layer that shows, or whose layers look
 different from its page, opens as before: an EPS as its printed page, a `.ai` file from its PDF content (where plain
-groups open ungrouped), with a warning saying why.
+groups open ungrouped), with a warning saying why. Layers look different when they draw an object the page doesn't (or
+miss one it draws), and, for an EPS whose page is the box of its art, when they print art outside it. With
+`textAs: "outlines"` a `.ai` file whose type shows opens from its PDF content, which has the type's outlines.
+
+The document then has what the file's page doesn't print: hidden objects and layers, layers that don't print, guides and
+the art outside the artboards, as the app that wrote the file shows them. Exports and `artboard.fitToArt` leave out the
+hidden art, the guides and template layers; an EPS's artboard is the file's artboard, not the page's bounding box. A
+print pipeline that wants only what the page prints opens the file with `editingData: false` (default `true`):
+an EPS as its page, a `.ai` file from its PDF content (a `.ai` saved without PDF compatibility then can't be opened).
+
+```json
+{"name":"run_command","arguments":{"command":"document.open","params":{"path":"/tmp/label.eps","editingData":false}}}
+```
 
 Opening a PDF (or `.ai`) imports every page as an artboard and layer; `document.open` takes `pages` ("2-3, 5", 1-based),
 `cropTo` (`bounding` (the art's bounds), `art`, `crop` (default), `trim`, `bleed`, `media`: the box each artboard gets)
@@ -804,7 +816,13 @@ it returns `{data}`, or `{dataBase64}` for `.ase`, and `user: true` saves into t
 folder of the desktop app (listed as category `user`, User Defined). `swatch.library.load {path? | data? |
 dataBase64?, name?}` loads a `.vcswatches`, `.gpl` or swatch exchange (`.ase`) file, or another document's swatches,
 as a library to add from. From an `.ase` file it reads RGB, CMYK, Lab and Gray colors as global, spot or process
-swatches and keeps their color groups.
+swatches and keeps their color groups. A file in the user library folder, or a file with the
+same extension and bytes as one there, loads as that User Defined library (category `user`).
+`swatch.library.copyToUser {library}` copies a loaded library into the user library folder of the desktop
+app (a library file as it is; a document's swatches or a library loaded from `data` or `dataBase64`
+as `.vcswatches`) under a name no file there has, and lists it as User Defined from then on; until the app
+quits, commands given its loaded id use the copy → `{library, name, count, path, copied}` (`copied: false`
+when the folder already held the same file). Without a user library folder the command is disabled.
 
 ## Graphic style libraries
 
@@ -827,7 +845,8 @@ its bounds.
 the styles unlinked from swatches, with their opacity, blend mode, isolate and knockout, and the patterns they paint
 with); without `path` it returns `{data}`, and `user: true` saves into the user library folder of the desktop app
 (category `user`, User Defined). `graphicStyle.loadLibrary {path? | data? | dataBase64?, name?}` loads a `.vcstyles`
-file, or another document's graphic styles, as a library to add from.
+file, or another document's graphic styles, as a library to add from; a file in the user library folder, or a file
+with the same extension and bytes as one there, loads as that User Defined library.
 
 ## Libraries
 
