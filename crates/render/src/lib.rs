@@ -107,7 +107,22 @@ pub struct RenderOptions {
     /// Images are sampled smoothly when scaled or rotated; off, each pixel takes its nearest image
     /// pixel (Pixel Preview with File Handling › Display Bitmaps as Anti-aliased Images off).
     pub smooth_images: bool,
+    /// Screen view in isolation mode: the isolated group or layer. Everything around it draws
+    /// dimmed ([`ISOLATION_DIM`]).
+    pub isolated: Option<NodeId>,
+    /// Composite in floating point (exports): translucent art over opaque art comes out exactly
+    /// opaque, where 8-bit compositing leaves alpha 254 on some anti-aliased edges (#787). Off,
+    /// the faster 8-bit pipeline (the canvas).
+    pub precise: bool,
+    /// Exports: Art Optimized edges are supersampled ([`supersample_factor`]): the art is drawn
+    /// with hard edges at several times the size and averaged down, so shapes that meet edge to
+    /// edge leave no seam of the background between them (#983). Off, edges are smoothed shape by
+    /// shape (the canvas).
+    pub supersample: bool,
 }
+
+/// The opacity of the art around an isolated group or layer.
+pub const ISOLATION_DIM: f32 = 0.5;
 
 /// How edges are rasterized (raster export option).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -174,8 +189,48 @@ impl Default for RenderOptions {
             progressive_placed: false,
             trace_views: false,
             smooth_images: true,
+            isolated: None,
+            precise: false,
+            supersample: false,
         }
     }
+}
+
+/// The most pixels a supersampled render draws (the frame and its compositing buffers hold a few
+/// times this many bytes).
+const MAX_SUPERSAMPLED_PIXELS: u64 = 40_000_000;
+
+/// How many times wider and taller a `w`×`h` render is drawn when supersampled: 4, or less where
+/// that would pass [`MAX_SUPERSAMPLED_PIXELS`] or the renderer's 65,535-pixel side; `None` when not
+/// even twice fits (the edges are then smoothed shape by shape).
+pub fn supersample_factor(w: u32, h: u32) -> Option<u32> {
+    (2..=4u32).rev().find(|k| {
+        let (sw, sh) = (u64::from(w) * u64::from(*k), u64::from(h) * u64::from(*k));
+        sw <= u64::from(u16::MAX) && sh <= u64::from(u16::MAX) && sw * sh <= MAX_SUPERSAMPLED_PIXELS
+    })
+}
+
+/// Average each `k`×`k` block of `src` (`w`×`h` pixels of 4 premultiplied bytes) into one pixel.
+fn downsample(src: &[u8], w: usize, h: usize, k: usize) -> Vec<u8> {
+    let (ow, oh) = (w / k.max(1), h / k.max(1));
+    let n = (k * k).max(1) as u32;
+    let mut out = vec![0u8; ow * oh * 4];
+    for (o, px) in out.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        let (ox, oy) = (o % ow.max(1), o / ow.max(1));
+        let mut acc = [0u32; 4];
+        for y in oy * k..(oy + 1) * k {
+            let row = y * w + ox * k;
+            for p in src.get(row * 4..(row + k) * 4).unwrap_or_default().as_chunks::<4>().0 {
+                for (a, v) in acc.iter_mut().zip(p) {
+                    *a += u32::from(*v);
+                }
+            }
+        }
+        for (d, a) in px.iter_mut().zip(acc) {
+            *d = ((a + n / 2) / n).min(255) as u8;
+        }
+    }
+    out
 }
 
 /// A rendered image (premultiplied RGBA8, row-major).
@@ -355,6 +410,14 @@ pub struct Renderer {
     /// Inline graphics being drawn inside inline graphics (a symbol whose art holds text showing
     /// it): drawing stops at [`MAX_INLINE_DEPTH`].
     inline_depth: u32,
+    /// How the frame being drawn is rasterized ([`RenderOptions::precise`]): its offscreen groups,
+    /// masks and patterns too.
+    raster: vello_cpu::RasterizerSettings,
+    /// [`RenderOptions::isolated`]'s layers and groups, from the top layer down to it, for the
+    /// frame (`stamp`) and document they were found in.
+    isolation: Option<(u64, usize, NodeId, Vec<NodeId>)>,
+    /// Drawing inside the isolated container or a dimmed object: nothing further dims.
+    isolation_settled: bool,
 }
 
 /// How deep inline graphics nest (text in a symbol shown inline in text…) before they draw nothing.
@@ -441,6 +504,9 @@ impl Renderer {
             adjusted: Default::default(),
             dim_images: None,
             inline_depth: 0,
+            raster: vello_cpu::RasterizerSettings::default(),
+            isolation: None,
+            isolation_settled: false,
         }
     }
 
@@ -453,6 +519,16 @@ impl Renderer {
     /// screen colours (4 bytes a pixel, see [`Self::render_region_inks`]).
     fn render_as(&mut self, doc: &Document, width: u32, height: u32, view: Affine, opts: &RenderOptions, inks: bool) -> Rendered {
         let start = now();
+        if opts.supersample && opts.anti_alias == AntiAlias::Art && opts.mask_view.is_none() {
+            let (w, h) = (width.clamp(1, u16::MAX as u32), height.clamp(1, u16::MAX as u32));
+            if let Some(k) = supersample_factor(w, h) {
+                let hard = RenderOptions { anti_alias: AntiAlias::None, supersample: false, ..opts.clone() };
+                let big = self.render_as(doc, w * k, h * k, Affine::scale(f64::from(k)) * view, &hard, inks);
+                let pixels = downsample(&big.pixels, big.width as usize, big.height as usize, k as usize);
+                self.stats.micros = now().saturating_sub(start);
+                return Rendered { width: w, height: h, pixels };
+            }
+        }
         let prepared = proof::prepare(doc, opts);
         let doc: &Document = &prepared;
         let w = width.clamp(1, u16::MAX as u32) as u16;
@@ -518,6 +594,8 @@ impl Renderer {
         };
         // `reset` keeps the threshold of the previous render: set it every time.
         ctx.set_aliasing_threshold(opts.anti_alias.threshold());
+        let render_mode = if opts.precise { vello_cpu::RenderMode::OptimizeQuality } else { vello_cpu::RenderMode::OptimizeSpeed };
+        self.raster = vello_cpu::RasterizerSettings { render_mode, ..Default::default() };
         if let Some(bg) = opts.background {
             ctx.set_transform(Affine::IDENTITY);
             ctx.set_paint(f.ink.fixed(bg));
@@ -546,7 +624,7 @@ impl Renderer {
         }
         ctx.flush();
         let mut pm = Pixmap::new(w, h);
-        ctx.render(&mut pm, &mut self.resources);
+        ctx.render_with(&mut pm, &mut self.resources, self.raster);
         if threads == 0 {
             self.ctx_st = Some(ctx);
         } else {
@@ -781,7 +859,7 @@ impl Renderer {
         (self.knockout, self.nested, self.backdrop, self.clip_paths) = outer;
         mctx.flush();
         let mut pm = Pixmap::new(w, h);
-        mctx.render(&mut pm, &mut self.resources);
+        mctx.render_with(&mut pm, &mut self.resources, self.raster);
         pm.data().iter().map(|p| mask_value(p.r, p.g, p.b, p.a, m.clip, m.invert)).collect()
     }
 
@@ -876,6 +954,46 @@ impl Renderer {
 
     /// [`Self::draw_node`] after culling and Layer Options.
     fn draw_layer_node(&mut self, ctx: &mut RenderContext, f: &Frame, n: &Node) {
+        // Isolation mode: the art around the isolated container draws dimmed (#833).
+        if let Some((isolated, path)) = self.isolation_path(f) {
+            // A container on the way down to it draws as usual: its members decide.
+            if path.contains(&n.id) && n.id != isolated {
+                return self.draw_layer_node_now(ctx, f, n);
+            }
+            self.isolation_settled = true;
+            if n.id == isolated {
+                self.draw_layer_node_now(ctx, f, n);
+            } else {
+                self.dimmed(ctx, f, &mut |r, c, fr| r.draw_layer_node_now(c, fr, n));
+            }
+            self.isolation_settled = false;
+            return;
+        }
+        self.draw_layer_node_now(ctx, f, n);
+    }
+
+    /// In isolation mode, while drawing outside the isolated container and the art dimmed around
+    /// it: the isolated container and its layers and groups, from the top layer down to it.
+    fn isolation_path(&mut self, f: &Frame) -> Option<(NodeId, Vec<NodeId>)> {
+        let isolated = f.opts.isolated.filter(|_| !self.isolation_settled)?;
+        let doc = std::ptr::from_ref(f.doc) as usize;
+        if self.isolation.as_ref().is_none_or(|(stamp, d, id, _)| (*stamp, *d, *id) != (self.stamp, doc, isolated)) {
+            self.isolation = Some((self.stamp, doc, isolated, f.doc.ancestry(isolated).unwrap_or_default()));
+        }
+        let path = self.isolation.as_ref().map(|(.., path)| path.clone()).filter(|p| !p.is_empty())?;
+        Some((isolated, path))
+    }
+
+    /// `draw` at [`ISOLATION_DIM`], with nothing inside dimmed again.
+    fn dimmed(&mut self, ctx: &mut RenderContext, f: &Frame, draw: &mut group::Content) {
+        let settled = std::mem::replace(&mut self.isolation_settled, true);
+        let comp = Composite { opacity: ISOLATION_DIM, ..Default::default() };
+        self.group(ctx, f, comp, draw);
+        self.isolation_settled = settled;
+    }
+
+    /// [`Self::draw_layer_node`] past isolation mode's dimming.
+    fn draw_layer_node_now(&mut self, ctx: &mut RenderContext, f: &Frame, n: &Node) {
         if fx::has_object_fx(n) {
             return self.draw_object_fx(ctx, f, &Arc::new(n.clone()), false);
         }
@@ -998,6 +1116,22 @@ impl Renderer {
     fn draw_children(&mut self, ctx: &mut RenderContext, f: &Frame, children: &[Arc<Node>], knockout: bool) {
         if knockout {
             self.draw_knockout(ctx, f, children);
+        } else if let Some((_, path)) = self.isolation_path(f) {
+            // Isolation mode, in a container on the way down to the isolated one: each run of
+            // members around it draws dimmed as one (#833).
+            let mut rest = children;
+            while let Some(i) = rest.iter().position(|c| path.contains(&c.id)) {
+                let (around, from) = rest.split_at(i);
+                if !around.is_empty() {
+                    self.dimmed(ctx, f, &mut |r, c, fr| around.iter().for_each(|n| r.draw_arc(c, fr, n)));
+                }
+                let Some((on_path, after)) = from.split_first() else { break };
+                self.draw_arc(ctx, f, on_path);
+                rest = after;
+            }
+            if !rest.is_empty() {
+                self.dimmed(ctx, f, &mut |r, c, fr| rest.iter().for_each(|n| r.draw_arc(c, fr, n)));
+            }
         } else {
             for c in children {
                 self.draw_arc(ctx, f, c);
@@ -1052,6 +1186,9 @@ impl Renderer {
     }
 
     fn draw_shape(&mut self, ctx: &mut RenderContext, f: &Frame, n: &Node, bp: &BezPath, rule: FillRule) {
+        if !drawable(bp, f.view, n) {
+            return;
+        }
         if fx::has_fx(n) {
             return self.draw_shape_fx(ctx, f, n, bp, rule);
         }
@@ -1566,6 +1703,21 @@ fn mask_value(r: u8, g: u8, b: u8, a: u8, clip: bool, invert: bool) -> u8 {
     (l.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
 }
 
+/// Most pixels from the origin that a shape handed to the rasterizer may reach, or a stroke be
+/// wide. A document's art stays within 4 million points, 2.6 billion pixels at the closest zoom.
+/// Geometry far beyond that (from a malformed file) makes vello_cpu panic on a worker thread or ask
+/// for more memory than there is, either of which ends the app: it is left undrawn.
+const MAX_DEVICE: f64 = 1e10;
+
+/// Can shape `bp` of `n` be drawn through `view`: its control points (finite) within
+/// [`MAX_DEVICE`] pixels, and its visible strokes no wider?
+fn drawable(bp: &BezPath, view: Affine, n: &Node) -> bool {
+    let b = view.transform_rect_bbox(bp.control_box());
+    let scale = view.determinant().abs().sqrt();
+    let widest = n.appearance.items.iter().filter_map(|i| if let AppearanceItem::Stroke(st) = i { Some(st.width) } else { None }).fold(0.0, f64::max);
+    [b.x0, b.y0, b.x1, b.y1].iter().all(|v| v.is_finite() && v.abs() <= MAX_DEVICE) && (widest * scale).is_finite() && widest * scale <= MAX_DEVICE
+}
+
 /// A render context on the calling thread. vello_cpu's `RenderContext::new` defaults to a
 /// multithreaded dispatcher, which panics on filter effects (glows, shadows, blur).
 pub(crate) fn single_threaded_context(w: u16, h: u16) -> RenderContext {
@@ -1759,6 +1911,8 @@ mod tests_container;
 mod tests_fontchange;
 #[cfg(test)]
 mod tests_freeform;
+#[cfg(test)]
+mod tests_fxzoom;
 #[cfg(test)]
 mod tests_isolation;
 #[cfg(test)]

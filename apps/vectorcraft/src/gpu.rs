@@ -26,12 +26,19 @@
 //! the graphics fail while the window is starting up, [`finish`] starts the app again without
 //! that adapter, as the next one in the order would be tried. Each restart leaves out one more
 //! adapter, so it ends when none is left.
+//!
+//! An adapter can also hang instead of failing: on a hybrid laptop with High Performance chosen,
+//! the discrete GPU never put the window's first frame on the screen, with no error and no panic,
+//! and the app stayed in the background without a window (#964). [`watch_first_frame`] gives the
+//! first frame [`FIRST_FRAME_TIMEOUT`] once the app is created and, when it doesn't come, starts
+//! the app again without that adapter in the same way.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use eframe::egui_wgpu::NativeAdapterSelectorMethod;
-use eframe::wgpu::{self, Backend, DeviceType, PowerPreference};
+use eframe::wgpu::{self, Backend, Backends, DeviceType, PowerPreference};
 
 /// The adapters a restart leaves out, those the window failed on, as comma-separated [`key`]s
 /// (`Vulkan:1002:164e`, `Metal:Intel Iris Pro Graphics`). Set by the app itself when it starts
@@ -49,6 +56,11 @@ const HELP: &str =
 /// #502 came on the first or second frame; later, the adapter has proved itself, and a lost
 /// window is something else (such as the compositor restarting).
 pub const STARTUP_FRAMES: u64 = 10;
+
+/// How long the window's first frame may take to reach the screen, from the app's creation,
+/// before its adapter counts as hanging ([`watch_first_frame`]). The first frame draws the whole
+/// interface and compiles its shaders, a second at most on a slow machine.
+pub const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// The preference used when Preferences say Automatic. Windows and macOS show frames from any GPU
 /// (the integrated one avoids the flicker of #306). Elsewhere, the system's own order: Mesa's
@@ -79,6 +91,15 @@ pub fn automatic(pref: Option<&str>, env: Option<PowerPreference>) -> bool {
 /// The GPUs to rank first: those that drive a display, when the choice is [`automatic`].
 pub fn preferred_displays(pref: Option<&str>, env: Option<PowerPreference>) -> Vec<DisplayGpu> {
     if automatic(pref, env) { display_gpus() } else { Vec::new() }
+}
+
+/// The graphics backends the window starts with: on Windows Direct3D 12, falling back to OpenGL,
+/// unless `WGPU_BACKEND` names others (`env_set`; `default` then holds them). Creating a Vulkan
+/// instance loads every installed Vulkan driver into the process, and a faulty one (Intel's
+/// `igvk64.dll`, #806) crashed the app before its window appeared. DX12 is Windows' own backend,
+/// as in PdfCraft. Elsewhere, `default`.
+pub fn backends(default: Backends, env_set: bool) -> Backends {
+    if cfg!(windows) && !env_set { Backends::DX12 | Backends::GL } else { default }
 }
 
 /// One adapter, as [`adapter_order`] sees it.
@@ -152,6 +173,7 @@ pub fn display_gpus() -> Vec<DisplayGpu> {
 }
 
 /// Record that the GPU `pci` drives a display, merging it with its other displays.
+#[cfg(any(windows, target_os = "linux", test))]
 fn add_display_gpu(gpus: &mut Vec<DisplayGpu>, pci: (u32, u32), primary: bool) {
     match gpus.iter_mut().find(|g| g.pci == pci) {
         Some(gpu) => gpu.primary |= primary,
@@ -188,6 +210,7 @@ fn windows_display_gpus() -> Vec<DisplayGpu> {
 
 /// The PCI `(vendor, device)` of a Windows device id such as
 /// `PCI\VEN_10DE&DEV_2204&SUBSYS_40421458&REV_A1`, any case; `None` for anything else.
+#[cfg(any(windows, test))]
 fn pci_ids(device_id: &str) -> Option<(u32, u32)> {
     let field = |key: &str| {
         device_id.split(['\\', '&']).find_map(|part| {
@@ -300,6 +323,8 @@ pub struct Startup {
     adapter: OnceLock<String>,
     /// The UI's context, which counts the frames run.
     ui: OnceLock<egui::Context>,
+    /// When the app was created, the files named at the start opened: the first frame is due.
+    ready: OnceLock<Instant>,
 }
 
 impl Startup {
@@ -307,6 +332,71 @@ impl Startup {
     pub fn created(&self, ctx: &egui::Context) {
         // Set once; the window is created once.
         let _ = self.ui.set(ctx.clone());
+    }
+
+    /// The app is ready to draw its first frame.
+    pub fn ready(&self) {
+        // Set once, like `created`.
+        let _ = self.ready.set(Instant::now());
+    }
+}
+
+/// What [`watch_first_frame`] makes of the window's start.
+#[derive(Debug, PartialEq, Eq)]
+enum FirstFrame {
+    /// Not due yet.
+    Wait,
+    /// On the screen (the second frame began, so the first was presented), or the window was
+    /// minimized at the start: nothing to watch.
+    Shown,
+    /// Overdue.
+    Hung,
+}
+
+/// The window's start after `frames` frames run, `since` its first frame was due.
+fn first_frame(frames: u64, since: Duration, minimized: bool) -> FirstFrame {
+    if frames >= 2 || minimized {
+        FirstFrame::Shown
+    } else if since >= FIRST_FRAME_TIMEOUT {
+        FirstFrame::Hung
+    } else {
+        FirstFrame::Wait
+    }
+}
+
+/// Watch the window's first frame from another thread: when it hasn't reached the screen
+/// [`FIRST_FRAME_TIMEOUT`] after the app was created ([`Startup::ready`]), start the app again
+/// without the adapter, as [`finish`] does for one that failed, and end this process, whose UI
+/// thread is stuck in the graphics driver.
+pub fn watch_first_frame(startup: Arc<Startup>) {
+    let watch = move || loop {
+        std::thread::sleep(Duration::from_millis(250));
+        let Some(due) = startup.ready.get() else { continue };
+        let ui = startup.ui.get();
+        let frames = ui.map_or(0, egui::Context::cumulative_frame_nr);
+        let minimized = ui.and_then(|c| c.input(|i| i.viewport().minimized)).unwrap_or(false);
+        match first_frame(frames, due.elapsed(), minimized) {
+            FirstFrame::Wait => continue,
+            FirstFrame::Shown => return,
+            FirstFrame::Hung => {}
+        }
+        let mut skip = skipped();
+        let Some(failed) = restart_without(true, frames, startup.adapter.get().map(String::as_str), &skip) else { return };
+        log::error!(
+            "the window's first frame didn't reach the screen in {}s on graphics adapter {failed}: starting again without it",
+            FIRST_FRAME_TIMEOUT.as_secs()
+        );
+        skip.push(failed.to_string());
+        match restart(&skip.join(",")) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                log::error!("starting again failed: {e}");
+                return;
+            }
+        }
+    };
+    if let Err(e) = std::thread::Builder::new().name("first frame".into()).spawn(watch) {
+        log::warn!("no watch on the window's first frame: {e}");
     }
 }
 
@@ -719,6 +809,24 @@ mod tests {
     }
 
     #[test]
+    fn a_first_frame_that_never_reaches_the_screen_hangs_its_adapter() {
+        let s = Duration::from_secs;
+        // The second frame began: the first was presented.
+        assert_eq!(first_frame(2, s(60), false), FirstFrame::Shown);
+        // Still drawing (or presenting) the first frame: waited for, then given up on (#964).
+        for frames in [0, 1] {
+            assert_eq!(first_frame(frames, s(3), false), FirstFrame::Wait);
+            assert_eq!(first_frame(frames, FIRST_FRAME_TIMEOUT, false), FirstFrame::Hung);
+        }
+        // A window minimized at the start may not draw again until restored.
+        assert_eq!(first_frame(1, s(60), true), FirstFrame::Shown);
+        // A hung adapter is left out once, like one that failed.
+        let skip = vec!["Dx12:10de:28a0".to_string()];
+        assert_eq!(restart_without(true, 1, Some("Dx12:10de:28a0"), &skip), None);
+        assert_eq!(restart_without(true, 1, Some("Dx12:8086:a7a8"), &skip), Some("Dx12:8086:a7a8"));
+    }
+
+    #[test]
     fn a_restart_tries_the_next_adapter() {
         let c = issue_502();
         let mut skip = vec![];
@@ -807,6 +915,18 @@ mod tests {
             assert_eq!(adapter_order(&c, power, &[], None, &[]), [1, 0, 3, 2], "{power:?}");
         }
         assert_eq!(adapter_order(&c, PowerPreference::LowPower, &[], None, &[c[1].key.clone()]), [0, 3, 2], "DX12 failed: Vulkan next");
+    }
+
+    #[test]
+    fn windows_never_loads_vulkan_drivers_unless_asked() {
+        let all = Backends::all();
+        let start = backends(all, false);
+        if cfg!(windows) {
+            assert_eq!(start, Backends::DX12 | Backends::GL, "#806");
+        } else {
+            assert_eq!(start, all);
+        }
+        assert_eq!(backends(Backends::VULKAN, true), Backends::VULKAN, "WGPU_BACKEND=vulkan still picks it");
     }
 
     #[test]

@@ -82,13 +82,23 @@ fn plural_east_slavic(n: u64) -> usize {
 }
 
 /// The registry. English first: it is the fallback and the source language.
-pub static LANGUAGES: [LangInfo; 11] = [
+pub static LANGUAGES: [LangInfo; 12] = [
     LangInfo { code: "en", name: "English", source: "", plural: plural_one_other, complete_menus: false, catalog: OnceLock::new() },
     // Japanese: the whole interface (every menu string and `tl!` literal) and the status and error
     // messages, keeping the product, workspace and perspective preset names in English (`MENU_KEEP_AS_IS`).
     LangInfo { code: "ja", name: "日本語", source: include_str!("ja.tsv"), plural: plural_none, complete_menus: true, catalog: OnceLock::new() },
     // Czech: every menu label (`menu_catalogs_translate_every_menu_label`); panels and dialogs not yet.
     LangInfo { code: "cs", name: "Čeština", source: include_str!("cs.tsv"), plural: plural_czech, complete_menus: false, catalog: OnceLock::new() },
+    // German: the whole interface and the status and error messages, keeping the same names in
+    // English as Spanish; every `de-*` locale (`de-DE`, `de-AT`, `de-CH`, `de-LU` …) resolves here.
+    LangInfo {
+        code: "de",
+        name: "Deutsch",
+        source: include_str!("de.tsv"),
+        plural: plural_one_other,
+        complete_menus: true,
+        catalog: OnceLock::new(),
+    },
     // Spanish: the whole interface in neutral, international Spanish, keeping the same names in
     // English as Japanese; every `es-*` locale (`es-ES`, `es-MX`, `es-AR`, `es-419` …) resolves here.
     LangInfo {
@@ -254,6 +264,14 @@ pub fn lang_from_tag(tag: &str) -> Option<Lang> {
     cands.iter().find_map(|c| Lang::from_code(c))
 }
 
+/// True when `tag` names the generic `C` / `POSIX` locale (or a variant like `C.UTF-8`), which on
+/// macOS means "no particular language" rather than English: the system language list decides.
+#[cfg(not(target_arch = "wasm32"))]
+fn is_c_locale(tag: &str) -> bool {
+    let base = tag.split(['.', '@']).next().unwrap_or("").to_ascii_lowercase();
+    matches!(base.as_str(), "c" | "posix")
+}
+
 /// Work out the system language on a background thread, so the first frame doesn't wait for the
 /// locale probe (which runs `reg.exe` on Windows and `defaults` on macOS). Call it at startup; a
 /// frame that needs the language before the probe finishes waits for it. A no-op on wasm.
@@ -295,6 +313,11 @@ fn detect_system_lang() -> Lang {
     // variables. `LANGUAGE` is a colon-separated priority list.
     for var in ["VECTORCRAFT_LOCALE", "LC_ALL", "LC_MESSAGES", "LANG", "LANGUAGE"] {
         let Some(v) = std::env::var(var).ok().filter(|v| !v.is_empty()) else { continue };
+        // `C` / `POSIX` (and variants like `C.UTF-8`, `POSIX.UTF-8`) mean "no particular locale":
+        // don't force English, fall through to the OS preferred-languages list below.
+        if v.split(':').all(is_c_locale) {
+            continue;
+        }
         if let Some(l) = v.split(':').find_map(lang_from_tag) {
             return l;
         }

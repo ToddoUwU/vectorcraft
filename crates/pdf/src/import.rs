@@ -21,7 +21,7 @@ use vectorcraft_geom::{FillRule, PathData};
 
 use crate::import_color::{Colors, Native};
 use crate::import_mask::{MaskSpec, contains, is_rectangle, luminance, mask_spec, white_cover};
-use crate::import_scan::{MAX_NESTING, Ocgs, Scan, all_on, hides_forms, scan_page, tag_key};
+use crate::import_scan::{FontNames, MAX_NESTING, Ocgs, Scan, all_on, hides_forms, scan_page, tag_key};
 use crate::import_shading::{clipped, extend_clip, fold_stop_opacity, mesh_shading, shading_gradient};
 use crate::import_text::{Families, LineFacts, Look, Placement, TextLine, Upright};
 use crate::{CropTo, ImportOptions, ImportReport, PdfError, TextAs};
@@ -135,6 +135,9 @@ fn group_layer(
 pub const OFF_ARTBOARD_NOTE: &str =
     "only the PDF-compatible part of this file was read: art outside its artboards is kept in the editor's private data alone, so it doesn't open";
 
+/// Warning: art reaching past the page box was clipped to it.
+pub(crate) const PAST_PAGE_NOTE: &str = "art reaching past the page was clipped to it, as PDF viewers show it";
+
 /// Import a PDF, returning the document plus warnings about content that was approximated or skipped.
 pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportReport, PdfError> {
     let original = crate::pages::open(bytes, opts.password.as_deref())?;
@@ -226,6 +229,29 @@ pub fn import_with_report(bytes: &[u8], opts: &ImportOptions) -> Result<ImportRe
                 art.retain(|n| n.visual_bounds().is_none_or(|r| r.x0 <= ab.x1 && r.x1 >= ab.x0 && r.y0 <= ab.y1 && r.y1 >= ab.y0));
             }
             parts.retain(|(_, art)| !art.is_empty());
+        }
+        // Viewers show a page through its crop box, so art reaching past it (a mock-up backdrop
+        // around the page, say) never showed. A clip to the page box that the file states is
+        // dropped as redundant (by hayro and by `push_clip_path`), so restore the box here:
+        // each object reaching past it keeps its own clip, which Fit to Artwork Bounds and
+        // `CropTo::Bounding` then respect.
+        // The crop box is what viewers show, whichever box the artboard takes. Not in a
+        // PDF-compatible `.ai`: its PDF part stands in for the editable document, whose art
+        // crossing the artboard edge isn't clipped, so it opens whole (#646).
+        let shown = xf.transform_rect_bbox(crate::pages::page_box(page, CropTo::Crop));
+        let page_box = shown.inflate(0.01, 0.01);
+        let mut clipped = false;
+        for (_, art) in parts.iter_mut().filter(|_| !ai) {
+            for n in art.iter_mut() {
+                if n.visual_bounds().is_some_and(|r| !contains(page_box, r)) {
+                    let clip = Arc::new(b.clip_node(&shown.to_path(0.1), FillRule::NonZero));
+                    *n = Arc::new(Node::new(b.id(), NodeKind::Group { children: vec![clip, n.clone()], clip: true }));
+                    clipped = true;
+                }
+            }
+        }
+        if clipped {
+            b.warn(PAST_PAGE_NOTE);
         }
         let children: Vec<Arc<Node>> = parts.iter().flat_map(|(_, v)| v.iter().cloned()).collect();
         placeholder &= ai && only_text(&children);
@@ -477,6 +503,46 @@ fn matching_face(
     best.map(|(_, f)| f)
 }
 
+/// The characters a glyph no mapping names is looked for among (#811): those single-byte fonts
+/// encode (ASCII, Latin-1, Latin Extended-A, general punctuation, the euro and trade mark signs,
+/// the fi and fl ligatures).
+const IDENTIFIABLE: [std::ops::RangeInclusive<u32>; 6] =
+    [0x21..=0x7E, 0xA1..=0x17F, 0x2010..=0x2044, 0x20AC..=0x20AC, 0x2122..=0x2122, 0xFB01..=0xFB02];
+
+/// The character whose glyph in installed `face` draws `embedded` (a glyph outline in thousandths
+/// of an em, y up): the first of [`IDENTIFIABLE`] with the same outline, point for point. A subset
+/// font embedded without a character map still carries the font's own outlines, so a glyph whose
+/// subset code names nothing is found this way. `None` when no glyph matches (another version of
+/// the font, or a glyph that is no character), and for empty glyphs, which every space draws.
+pub(crate) fn identify_glyph(face: &vectorcraft_text::FontFace, embedded: &BezPath) -> Option<char> {
+    if embedded.elements().is_empty() {
+        return None;
+    }
+    let k = 1000.0 / face.units_per_em();
+    // Installed outlines are y-down in font units.
+    let to_pdf = Affine::new([k, 0.0, 0.0, -k, 0.0, 0.0]);
+    let db = vectorcraft_text::FontDb::global();
+    IDENTIFIABLE.iter().cloned().flatten().filter_map(char::from_u32).find(|c| {
+        let gid = face.glyph_for(*c);
+        gid != 0 && same_shape(embedded, &(to_pdf * db.outline(face, gid).as_ref().clone()))
+    })
+}
+
+/// Do outlines `a` and `b` draw the same segments, every point within 2/1000 em (closing
+/// commands aside)?
+fn same_shape(a: &BezPath, b: &BezPath) -> bool {
+    let drawn = |p: &BezPath| p.elements().iter().filter(|e| !matches!(e, PathEl::ClosePath)).copied().collect::<Vec<_>>();
+    let (a, b) = (drawn(a), drawn(b));
+    let near = |p: kurbo::Point, q: kurbo::Point| (p - q).hypot() <= 2.0;
+    a.len() == b.len()
+        && a.iter().zip(&b).all(|(x, y)| match (x, y) {
+            (PathEl::MoveTo(p), PathEl::MoveTo(q)) | (PathEl::LineTo(p), PathEl::LineTo(q)) => near(*p, *q),
+            (PathEl::QuadTo(p1, p2), PathEl::QuadTo(q1, q2)) => near(*p1, *q1) && near(*p2, *q2),
+            (PathEl::CurveTo(p1, p2, p3), PathEl::CurveTo(q1, q2, q3)) => near(*p1, *q1) && near(*p2, *q2) && near(*p3, *q3),
+            _ => false,
+        })
+}
+
 /// The character of glyph `text` when its outline can be compared with an installed font's: a
 /// single character, and not CJK punctuation set vertically (its vertical form differs).
 fn comparable(text: &str, vertical: bool) -> Option<char> {
@@ -626,8 +692,9 @@ struct Builder<'p> {
     /// Mask keys of CMYK images whose mask turned out to hide nothing.
     opaque: HashSet<u128>,
     warnings: Vec<String>,
-    /// Fonts by cache key → base font name (from [`scan_page`]).
-    fonts: HashMap<u128, String>,
+    /// Fonts by cache key → base font name and whether the file carries its glyphs (from
+    /// [`scan_page`]).
+    fonts: FontNames,
     font_names: HashMap<u128, FontInfo>,
     families: Option<Families>,
     missing_fonts: Vec<String>,
@@ -640,6 +707,9 @@ struct Builder<'p> {
     /// Font (cache key) → the installed face that draws its glyphs, decided from its first glyph
     /// that can be compared ([`matching_face`]); `None`: its glyphs differ, so it stays outlines.
     matched: HashMap<u128, Option<Arc<vectorcraft_text::FontFace>>>,
+    /// (Font, glyph) → the character its outline matches in the installed face, for glyphs no
+    /// mapping names ([`Builder::identified_char`]).
+    identified: HashMap<(u128, u32), Option<char>>,
     /// Per font: the installed version its type names, when it isn't the one its family and style
     /// resolve to (see `CharStyle::font_version`).
     versions: HashMap<u128, Option<String>>,
@@ -791,6 +861,7 @@ impl<'p> Builder<'p> {
             cid_text: HashMap::new(),
             font_chars: HashMap::new(),
             matched: HashMap::new(),
+            identified: HashMap::new(),
             versions: HashMap::new(),
             mask: None,
             masked: vec![],
@@ -1260,12 +1331,23 @@ impl<'p> Builder<'p> {
 
     /// The family and style of font `key` (drawing glyph `o`): the installed face of its PostScript
     /// name, else the available family its name reads as; whether it is available.
+    /// The character of glyph `glyph` of font `key` that no mapping names, found by its outline in
+    /// the installed face of the font's name ([`identify_glyph`]); cached per glyph.
+    fn identified_char(&mut self, key: u128, glyph: u32, o: &hayro_interpret::font::OutlineGlyph) -> Option<char> {
+        if let Some(c) = self.identified.get(&(key, glyph)) {
+            return *c;
+        }
+        let c = self.font_name(key, o).face.and_then(|f| identify_glyph(&f, &o.outline()));
+        self.identified.insert((key, glyph), c);
+        c
+    }
+
     fn font_name(&mut self, key: u128, o: &hayro_interpret::font::OutlineGlyph) -> FontInfo {
         if let Some(n) = self.font_names.get(&key) {
             return n.clone();
         }
         let data = o.font_data();
-        let name = self.fonts.get(&key).cloned().or_else(|| data.as_ref().and_then(|d| d.postscript_name.clone()));
+        let name = self.fonts.get(&key).map(|(n, _)| n.clone()).or_else(|| data.as_ref().and_then(|d| d.postscript_name.clone()));
         let (weight, italic) = data.as_ref().map_or((None, false), |d| (d.weight, d.is_italic));
         // A subset's six-letter tag.
         let ps = name.as_deref().map(|n| match n.split_once('+') {
@@ -1319,7 +1401,9 @@ impl<'p> Builder<'p> {
                             .font_chars
                             .entry(key)
                             .or_insert_with(|| o.font_data().and_then(|d| font_chars(d.data.as_ref().as_ref())).map(Arc::new));
-                        (chars.as_ref().and_then(|m| m.get(&glyph)).map(|c| BfString::Char(*c)), false)
+                        let named = chars.as_ref().and_then(|m| m.get(&glyph)).copied();
+                        // Still unnamed: the installed font may draw the same outline (#811).
+                        (named.or_else(|| self.identified_char(key, glyph, o)).map(BfString::Char), false)
                     }
                 }
             }
@@ -1346,7 +1430,12 @@ impl<'p> Builder<'p> {
         let upright = width.is_some_and(|w| w.abs() <= 1.0);
         let top = m * kurbo::Point::new(f64::from(width.filter(|w| *w > 1.0).unwrap_or(1000.0)) * 0.5, 880.0);
         let mut info = self.font_name(key, o);
-        if let Some(face) = &info.face {
+        // A font the file doesn't carry is drawn with a stand-in: its glyphs can't tell which
+        // style of the installed family it is, so the name decides.
+        let embedded = self.fonts.get(&key).is_none_or(|(_, e)| *e);
+        if let Some(face) = &info.face
+            && embedded
+        {
             let decided = match self.matched.get(&key) {
                 Some(m) => m.clone(),
                 // A glyph that can't be compared (several characters, a vertical form) decides

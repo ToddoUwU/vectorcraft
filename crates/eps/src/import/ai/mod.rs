@@ -27,8 +27,8 @@ use std::io::Read as _;
 use super::lex::find;
 use crate::ps;
 
-pub(crate) use read::slot_of;
-pub use read::{Structure, read};
+pub use read::{Structure, artboards, read};
+pub(crate) use read::{slot_frame, slot_of};
 
 #[cfg(test)]
 mod tests;
@@ -50,6 +50,11 @@ pub fn eps_data(ps: &[u8]) -> Option<Result<Vec<u8>, String>> {
     let rest = ps.get(start..)?;
     let section = rest.get(..find(rest, EPS_END).unwrap_or(rest.len())).unwrap_or_default();
     Some(eps_section(section))
+}
+
+/// Does the EPS `ps` carry editing data ([`eps_data`] isn't `None`)?
+pub fn has_eps_data(ps: &[u8]) -> bool {
+    find(ps, EPS_BEGIN).is_some()
 }
 
 /// The editing data between the EPS markers: header comments, then the data (encoded or not).

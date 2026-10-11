@@ -58,6 +58,25 @@ fn a_whole_rectangle_rounds_all_corners_and_given_corners_alone() {
     assert_eq!(corners(&s, id).1[3], CornerKind::Chamfer);
 }
 
+/// #938: `items` rounds several objects in one step, each its own corners (or all of them).
+#[test]
+fn items_round_several_objects_each_its_own_corners() {
+    let (mut s, a) = session();
+    let b = NodeId(s.execute("shape.rectangle", &json!({"x": 200, "y": 10, "width": 100, "height": 60})).unwrap()["id"].as_u64().unwrap());
+    let undo = s.doc().unwrap().history.undo.len();
+    run(&mut s, json!({"items": [{"id": a.0, "corners": [2]}, {"id": b.0}], "radius": 6}));
+    assert_eq!(corners(&s, a).0, [0.0, 0.0, 6.0, 0.0]);
+    assert_eq!(corners(&s, b).0, [6.0; 4]);
+    assert_eq!(s.doc().unwrap().history.undo.len(), undo + 1, "one step");
+    for p in [
+        json!({"items": 3, "radius": 1}),
+        json!({"items": [{"corners": [1]}], "radius": 1}),
+        json!({"items": [{"id": a.0, "corners": [9]}], "radius": 1}),
+    ] {
+        assert!(s.execute("object.setLiveShape", &p).is_err(), "{p}");
+    }
+}
+
 #[test]
 fn bad_corners_and_kinds_are_errors() {
     let (mut s, id) = session();
@@ -306,4 +325,43 @@ fn an_ellipse_takes_pie_angles_and_inverts() {
     assert_eq!(pie(&s).0, (0.0, 360.0));
     assert_eq!(s.doc().unwrap().doc.node(id).unwrap().path_data().unwrap().anchor_count(), 4);
     assert!(s.execute("object.setLiveShape", &json!({"pieStart": "half"})).is_err());
+}
+
+/// #812: a polygon's Polygon Properties: its angle, radius and side length, each one undo step;
+/// Make Sides Equal after an uneven scale; bad values are errors.
+#[test]
+fn a_polygon_takes_its_angle_radius_side_length_and_equal_sides() {
+    let mut s = Session::new();
+    s.execute("file.new", &json!({"width": 400, "height": 400})).unwrap();
+    let id = NodeId(s.execute("shape.polygon", &json!({"cx": 200, "cy": 200, "radius": 50, "sides": 6})).unwrap()["id"].as_u64().unwrap());
+    let live = |s: &Session| match &s.doc().unwrap().doc.node(id).unwrap().kind {
+        NodeKind::Path { live: Some(l @ LiveShape::Polygon { .. }), path, .. } => (l.clone(), path.bounds().unwrap()),
+        k => panic!("{k:?}"),
+    };
+    let close = |a: f64, b: f64| (a - b).abs() < 1e-6;
+    run(&mut s, json!({"polygonAngle": 90}));
+    let (l, b) = live(&s);
+    assert!(close(l.polygon_angle().unwrap(), 90.0), "{l:?}");
+    // Its first vertex, straight up before, points left now: the hexagon is 100 wide, 86.6 tall.
+    assert!(close(b.width(), 100.0) && close(b.height(), 86.602_540_378) && close(b.center().x, 200.0), "{b:?}");
+    run(&mut s, json!({"polygonRadius": 80}));
+    assert!(close(live(&s).0.polygon_radius().unwrap(), 80.0));
+    // A hexagon's side is as long as its radius; with 4 sides the radius is side / √2.
+    run(&mut s, json!({"sideLength": 30}));
+    assert!(close(live(&s).0.polygon_radius().unwrap(), 30.0));
+    run(&mut s, json!({"sides": 4, "sideLength": 30}));
+    assert!(close(live(&s).0.polygon_radius().unwrap(), 30.0 / 2f64.sqrt()));
+    s.execute("edit.undo", &json!({})).unwrap();
+    let LiveShape::Polygon { sides, .. } = live(&s).0 else { panic!("polygon") };
+    assert_eq!(sides, 6, "one undo step");
+    // Scaled unevenly its sides differ; Make Sides Equal makes them equal again, in place.
+    s.execute("object.scale", &json!({"sx": 200, "sy": 100})).unwrap();
+    let (l, b) = live(&s);
+    assert!(!l.polygon_sides_equal() && l.polygon_angle().is_some());
+    run(&mut s, json!({"makeSidesEqual": true}));
+    let (l, after) = live(&s);
+    assert!(l.polygon_sides_equal() && close(after.center().x, b.center().x) && close(after.center().y, b.center().y), "{b:?} → {after:?}");
+    for bad in [json!({"polygonRadius": 0}), json!({"sideLength": -3}), json!({"polygonRadius": "big"}), json!({"polygonAngle": "left"})] {
+        assert!(s.execute("object.setLiveShape", &bad).is_err(), "{bad}");
+    }
 }

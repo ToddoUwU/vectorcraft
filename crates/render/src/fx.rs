@@ -61,6 +61,7 @@ pub(crate) fn has_object_fx(n: &Node) -> bool {
         || effects::has_container_appearance(n)
         || effects::has_crop_marks(n)
         || effects::has_adjustment(n)
+        || effects::has_revolve(n)
 }
 
 /// Is `n` a group or layer (whose evaluated art keeps its knockout setting)?
@@ -123,6 +124,12 @@ fn item_effects(item: &AppearanceItem) -> &[Effect] {
 
 /// Visual bounds including geometry effects, stroke outsets and shadows/glows.
 pub(crate) fn visual_bounds(n: &Node) -> Option<Rect> {
+    if let Some(art) = effects::revolve_art(n) {
+        return cull_bounds(&art).map(|b| {
+            let o = effects::outset(&n.appearance.effects, b);
+            b.inflate(o, o)
+        });
+    }
     let bp = node_bezpath(n)?;
     let ctx = GeomContext::of(n);
     let g = effected_path(n, &bp);
@@ -185,10 +192,6 @@ fn shadow_filter(dx: f64, dy: f64, blur: f64, color: peniko::Color) -> Filter {
         color,
         edge_mode: EdgeMode::None,
     })
-}
-
-fn blur_filter(sigma: f64) -> Filter {
-    Filter::from_primitive(FilterPrimitive::GaussianBlur { std_deviation: sigma.max(0.0) as f32, edge_mode: EdgeMode::None })
 }
 
 fn pcolor(ink: Ink, c: &vectorcraft_doc::color::Color) -> peniko::Color {
@@ -412,12 +415,13 @@ impl Renderer {
             _ => None,
         };
         let container = is_container(a);
-        let art = match effects::crop_marks_art(a).or_else(|| effects::reshape(a, symbol.as_ref())) {
+        let art = match effects::crop_marks_art(a).or_else(|| effects::revolve_art(a)).or_else(|| effects::reshape(a, symbol.as_ref())) {
             Some(r) => r,
             None if container => effects::evaluate_container(a).unwrap_or_else(|| (**a).clone()),
             None if matches!(a.kind, NodeKind::Text(_) | NodeKind::Image(_) | NodeKind::Path { .. } | NodeKind::Compound { .. }) => (**a).clone(),
             None => effects::outline_art(a, symbol.as_ref()).unwrap_or_else(|| Node::group(a.id, vec![])),
         };
+        let art = if effects::has_revolve(a) { effects::evaluate_container(&art).unwrap_or(art) } else { art };
         let mut art = self.adjusted_art(doc, art, effects::color_map(&a.appearance.effects).as_ref());
         // A path's geometry effects still apply when it is drawn.
         let path = matches!(art.kind, NodeKind::Path { .. } | NodeKind::Compound { .. });
@@ -495,44 +499,12 @@ impl Renderer {
                 c.pop_layer();
             });
         }
-        // The content itself (blurred / feathered / filtered).
-        let blur: f64 = rfx
-            .iter()
-            .map(|fx| match fx {
-                RasterFx::Feather { radius } | RasterFx::GaussianBlur { radius } => radius.max(0.0),
-                _ => 0.0,
-            })
-            .sum();
-        if rfx.iter().any(|fx| matches!(fx, RasterFx::Pixel(_))) {
+        // The content itself (blurred / feathered / filtered), on its pixels: a filter layer's blur
+        // works on a coarser grid tied to the canvas, so the blurred art shifted by up to a pixel
+        // and looked blocky as the view moved by parts of a pixel (#755).
+        let blurs = rfx.iter().any(|fx| matches!(fx, RasterFx::Feather { radius } | RasterFx::GaussianBlur { radius } if *radius > 0.0));
+        if blurs || rfx.iter().any(|fx| matches!(fx, RasterFx::Pixel(_))) {
             self.pixel_content(ctx, f, content, rfx, paint);
-        } else if blur > 0.0 {
-            self.with_filters(ctx, f, reach, blur, None, |r, c, fr, _| {
-                let mut layers = 0;
-                for fx in rfx {
-                    match fx {
-                        RasterFx::Feather { radius } if *radius > 0.0 => {
-                            c.set_transform(fr.view);
-                            if let Some((g, rule)) = content.outline {
-                                c.set_fill_rule(fill_rule(rule));
-                                c.push_clip_layer(g);
-                                layers += 1;
-                            }
-                            c.push_layer(None, None, None, None, Some(blur_filter(radius / 2.0)));
-                            layers += 1;
-                        }
-                        RasterFx::GaussianBlur { radius } if *radius > 0.0 => {
-                            c.set_transform(fr.view);
-                            c.push_layer(None, None, None, None, Some(blur_filter(radius / 2.0)));
-                            layers += 1;
-                        }
-                        _ => {}
-                    }
-                }
-                paint(r, c, fr);
-                for _ in 0..layers {
-                    c.pop_layer();
-                }
-            });
         } else {
             paint(self, ctx, f);
         }
@@ -631,7 +603,16 @@ impl Renderer {
         off.flush();
         let mut pm = vello_cpu::Pixmap::new(wu, hu);
         off.render(&mut pm, &mut self.resources);
-        let space = effects::PixelSpace { to_doc, px, center: content.reach.center() };
+        let channels = match f.ink {
+            Ink::Cmy => effects::pixel::Channels::CmyPlane,
+            Ink::K => effects::pixel::Channels::KPlane,
+            Ink::Display if f.doc.color_mode == vectorcraft_doc::ColorMode::Cmyk => effects::pixel::Channels::Cmyk,
+            Ink::Display => effects::pixel::Channels::Rgb,
+        };
+        // De-Interlace's field lines: the rows of the document's raster grid (1 to 2400 ppi).
+        let ppi = Some(f.doc.raster_effects_ppi).filter(|v| v.is_finite()).unwrap_or(72.0).clamp(1.0, 2400.0);
+        let (center, extent) = (content.reach.center(), 0.5 * content.reach.width().hypot(content.reach.height()));
+        let space = effects::PixelSpace { to_doc, px, center, channels, line: 72.0 / ppi, extent };
         let (wz, hz) = (wu as usize, hu as usize);
         for fx in chain {
             match fx {
